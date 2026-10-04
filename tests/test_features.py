@@ -219,5 +219,5 @@ class GateTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_action_never_connects(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(server, "_get_client") as connect:
             result = await server.call_tool("create_discussion", {"confirm": True})
-        self.assertIn("disabled", result[0].text)
+        self.assertIn("disabled", result.content[0].text)
         connect.assert_not_called()

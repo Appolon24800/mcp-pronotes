@@ -15,6 +15,7 @@ from pronotepy.dataClasses import Util
 
 from communication import CHILD, PAGE, attachment, paginate, tool
 import pedagogy
+from errors import ToolError
 
 DOWNLOAD_DIRECTORY = Path(__file__).parent / "downloads"
 
@@ -23,7 +24,7 @@ ID = {"type": "string", "minLength": 1}
 PERIOD = {"period_name": {"type": "string"}, "child_name": CHILD}
 DISCUSSION = {"discussion_id": ID, "child_name": CHILD}
 MESSAGE = {**DISCUSSION, "message_id": ID}
-CONFIRM = {"confirm": {"type": "boolean", "const": True, "description": "Explicit user approval of this exact account-changing action."}}
+CONFIRM = {"confirm": {"type": "boolean", "default": False, "description": "Must be true after the user approves this exact account-changing action. Omitted or false values return CONFIRMATION_REQUIRED."}}
 WRITES = {"set_homework_done", "create_discussion", "reply_to_message", "mark_discussion_read", "mark_information_read"}
 TOOLS = [
     tool("get_report_card", "Read a published bulletin, subject averages and teacher comments. Unpublished reports return available=false.", PERIOD),
@@ -37,10 +38,12 @@ TOOLS = [
         "date": {"type": "string", "description": "YYYY-MM-DD. Defaults to today."},
         "portrait": {"type": "boolean", "default": False}, "child_name": CHILD,
     }),
-    tool("download_attachment", "Download an account-owned file into the private local downloads directory. No arbitrary URLs or output paths are accepted. Maximum size is 20 MiB.", {
-        "source": {"type": "string", "enum": ["homework", "information", "lesson", "teaching_resource"]},
-        "source_id": ID, "attachment_id": ID, "child_name": CHILD,
-        "date_from": {"type": "string"}, "date_to": {"type": "string"},
+    tool("download_attachment", "Download an account-owned file, at most 20 MiB, into the private downloads directory. Sources: homework, information, lesson, teaching_resource. Use the attachment's download metadata for IDs and dates. Lesson lookups accept content IDs or lesson IDs and default to the past 14 days; older files require date_from/date_to. No arbitrary URLs or paths.", {
+        "source": {"type": "string", "enum": ["homework", "information", "lesson", "teaching_resource"], "description": "homework, information, lesson, or teaching_resource. Not lesson_contents."},
+        "source_id": {**ID, "description": "Homework ID, information ID, lesson-content ID or lesson ID, or teaching-resource attachment ID."},
+        "attachment_id": {**ID, "description": "ID of a file attachment, not its URL."}, "child_name": CHILD,
+        "date_from": {"type": "string", "description": "YYYY-MM-DD. Match the date range used to list the attachment."},
+        "date_to": {"type": "string", "description": "YYYY-MM-DD. Maximum lookup range is 93 days."},
     }, ("source", "source_id", "attachment_id")),
     tool("get_survey", "Read every survey question and attachment without answering or acknowledging. Does not interpret undocumented response fields.", {"information_id": ID, "child_name": CHILD}, ("information_id",)),
 ]
@@ -52,7 +55,7 @@ for name, description, properties, required in [
     ("mark_discussion_read", "Change a discussion read flag after explicit approval.", {**DISCUSSION, "read": {"type": "boolean"}}, ("discussion_id", "read")),
     ("mark_information_read", "Acknowledge or unacknowledge an announcement after explicit approval. Upstream compatibility may vary.", {"information_id": ID, "read": {"type": "boolean"}}, ("information_id", "read")),
 ]:
-    spec = tool(name, description + " Requires PRONOTE_ENABLE_WRITES=1 and confirm=true.", {**properties, "child_name": CHILD, **CONFIRM}, (*required, "confirm"))
+    spec = tool(name, description + " Requires PRONOTE_ENABLE_WRITES=1 and confirm=true.", {**properties, "child_name": CHILD, **CONFIRM}, required)
     spec.annotations = types.ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=name.startswith(("set_", "mark_")))
     TOOLS.append(spec)
 next(item for item in TOOLS if item.name == "download_attachment").annotations.readOnlyHint = False
@@ -60,10 +63,10 @@ next(item for item in TOOLS if item.name == "download_attachment").annotations.r
 
 def authorize(name, args):
     if name in WRITES:
-        if os.environ.get("PRONOTE_ENABLE_WRITES") != "1":
-            raise ValueError("Account-changing tools are disabled. Set PRONOTE_ENABLE_WRITES=1 to enable them.")
         if args.get("confirm") is not True:
-            raise ValueError("This action requires explicit user approval and confirm=true.")
+            raise ToolError("Confirmation required: re-send with confirm=true after explicit user approval.", "CONFIRMATION_REQUIRED")
+        if os.environ.get("PRONOTE_ENABLE_WRITES") != "1":
+            raise ToolError("Account-changing tools are disabled. Set PRONOTE_ENABLE_WRITES=1 to enable them.", "WRITES_DISABLED")
 
 
 def find(rows, identifier, label):
@@ -71,7 +74,7 @@ def find(rows, identifier, label):
         raise ValueError(f"{label} ID is required.")
     row = next((row for row in rows if row.id == identifier), None)
     if row is None:
-        raise ValueError(f"{label} not found in this account.")
+        raise ToolError(f"{label} not found in this account.", "NOT_FOUND")
     return row
 
 
@@ -240,7 +243,7 @@ def resolve_attachment(client, args):
         while True:
             page = pedagogy.handle(name, client, options, None)
             for row in page["lesson_contents" if source == "lesson" else "teaching_resources"]:
-                if source == "lesson" and row["id"] == args.get("source_id"):
+                if source == "lesson" and args.get("source_id") in {row["id"], row.get("lesson_id")}:
                     files.extend(row["attachments"])
                 elif source == "teaching_resource" and row.get("attachment") and row["attachment"]["id"] == args.get("source_id"):
                     files.append(row["attachment"])
@@ -251,7 +254,7 @@ def resolve_attachment(client, args):
         raise ValueError("Unknown attachment source.")
     file = next((item for item in files if item["id"] == args.get("attachment_id")), None)
     if file is None or file["type"] != 1:
-        raise ValueError("File attachment not found in this account. External links cannot be downloaded.")
+        raise ToolError("File attachment not found in this account and date range. For lessons use the content ID or lesson ID and matching date_from/date_to, or copy the attachment's download metadata. External links cannot be downloaded.", "ATTACHMENT_NOT_FOUND")
     return file
 
 

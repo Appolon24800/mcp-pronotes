@@ -34,6 +34,10 @@ async def main():
                     failed += 1
                     print(f"{name}: FAILED")
                     return None
+                if data.get("partial"):
+                    failed += 1
+                    print(f"{name}: FAILED. Some sections are unavailable.")
+                    return None
                 passed += 1
                 counts = {key: value for key, value in data.items()
                           if key.endswith("_count") and isinstance(value, int)}
@@ -59,7 +63,16 @@ async def main():
                 skipped += 1
                 print("get_information: SKIPPED. No announcement available in the first page.")
             for name in ("get_lesson_contents", "get_teaching_resources"):
-                await check(name, recent)
+                resources = await check(name, recent)
+                if name == "get_lesson_contents" and resources:
+                    pdf = next((file for row in resources["lesson_contents"] for file in row["attachments"] if file.get("readable_as_pdf")), None)
+                    if pdf:
+                        await check("read_attachment_text", {**pdf["download"], "page_limit": 1, "max_characters": 1000})
+                    else:
+                        skipped += 1
+                        print("read_attachment_text: SKIPPED. No lesson PDF available in the first page.")
+            await check("summarize_week", {"date": today.isoformat()})
+            await check("get_grade_trend", {})
             for name in ("get_report_card", "get_evaluations", "get_teaching_staff", "get_recipients", "export_calendar", "export_timetable_pdf"):
                 result = await check(name, {})
                 if result is not None and result.get("available") is False:

@@ -22,14 +22,20 @@ class StdioTests(unittest.IsolatedAsyncioTestCase):
                 initialized = await session.initialize()
                 self.assertEqual(initialized.serverInfo.name, "pronotes")
                 listed = await session.list_tools()
-                self.assertEqual(len(listed.tools), 28)
+                self.assertEqual(len(listed.tools), 31)
                 blocked = await session.call_tool("create_discussion", {
                     "subject": "Fictional", "message": "Fictional", "recipient_ids": ["fictional"], "confirm": True,
                 })
                 self.assertIn("disabled", json.loads(blocked.content[0].text)["error"])
-                # The SDK rejects invalid inputs before the handler can connect.
+                # The server validates inputs and returns structured refusals.
                 rejected = await session.call_tool("get_timetable", {"unexpected": True})
-                self.assertTrue(rejected.isError)
+                self.assertFalse(rejected.isError)
+                self.assertEqual(rejected.structuredContent["error_code"], "INVALID_ARGUMENT")
+                unconfirmed = await session.call_tool("create_discussion", {
+                    "subject": "Fictional", "message": "Fictional", "recipient_ids": ["fictional"],
+                })
+                self.assertFalse(unconfirmed.isError)
+                self.assertEqual(unconfirmed.structuredContent["error_code"], "CONFIRMATION_REQUIRED")
                 unknown = await session.call_tool("unknown_tool", {})
                 self.assertIn("Unknown tool", json.loads(unknown.content[0].text)["error"])
 

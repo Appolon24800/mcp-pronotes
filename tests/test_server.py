@@ -11,6 +11,8 @@ import server
 
 
 def decode(result):
+    if isinstance(result, server.types.CallToolResult):
+        result = result.content
     return json.loads(result[0].text)
 
 
@@ -149,7 +151,7 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_tool_registry(self):
         tools = await server.list_tools()
         self.assertEqual({tool.name for tool in tools}, server.TOOL_HANDLERS)
-        self.assertEqual(len(tools), 28)
+        self.assertEqual(len(tools), 31)
         for tool in tools:
             self.assertFalse(tool.inputSchema["additionalProperties"])
 

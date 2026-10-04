@@ -27,6 +27,11 @@ from auth import login_from_file, persist_credentials
 import communication
 import pedagogy
 import features
+import pdf_text
+import overview
+from errors import ToolError
+from numeric import grade_values, number
+from jsonschema import Draft202012Validator
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
@@ -212,12 +217,13 @@ def _format_homework(hw: Any) -> dict[str, Any]:
         "due_date": hw.date.isoformat() if hw.date else None,
         "done": hw.done,
         "background_color": hw.background_color,
-        "attachments": [communication.attachment(item) for item in hw.files],
+        "attachments": [communication.attachment(item, "homework", getattr(hw, "id", None), {"date_from": hw.date.isoformat(), "date_to": hw.date.isoformat()}) for item in hw.files],
     }
 
 
 def _format_grade(grade: Any) -> dict[str, Any]:
     return {
+        **grade_values(grade.grade, grade.out_of, getattr(grade, "coefficient", None)),
         "subject": grade.subject.name if grade.subject else None,
         "grade": grade.grade,
         "out_of": grade.out_of,
@@ -263,12 +269,16 @@ def _format_average(avg: Any) -> dict[str, Any]:
         "max": avg.max,
         "min": avg.min,
         "out_of": avg.out_of,
+        "student_average_numeric": number(avg.student),
+        "class_average_numeric": number(avg.class_average),
+        "out_of_numeric": number(avg.out_of),
     }
 
 
-def _error_result(message: str) -> list[types.TextContent]:
+def _error_result(message: str, code: str = "INVALID_ARGUMENT", relogin_required: bool = False) -> list[types.TextContent]:
     """Return an error as MCP tool content."""
-    return [types.TextContent(type="text", text=json.dumps({"error": message}, ensure_ascii=False))]
+    return _json_result({"success": False, "error": message, "error_code": code,
+                         "relogin_required": relogin_required, "retryable": False})
 
 
 def _json_result(data: Any) -> list[types.TextContent]:
@@ -439,7 +449,7 @@ async def list_tools() -> list[types.Tool]:
                 "additionalProperties": False,
             },
         ),
-    ] + communication.TOOLS + pedagogy.TOOLS + features.TOOLS
+    ] + communication.TOOLS + pedagogy.TOOLS + features.TOOLS + pdf_text.TOOLS + overview.TOOLS
 
 
 TOOL_HANDLERS = {
@@ -450,16 +460,39 @@ TOOL_HANDLERS = {
     "get_student_info",
     "get_averages",
     "get_menus",
-} | {tool.name for tool in communication.TOOLS + pedagogy.TOOLS + features.TOOLS}
+} | {tool.name for tool in communication.TOOLS + pedagogy.TOOLS + features.TOOLS + pdf_text.TOOLS + overview.TOOLS}
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+@app.call_tool(validate_input=False)
+async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    # Keep schema validation, but return actionable domain errors instead of the
+    # SDK's generic isError result, which MCPO maps to HTTP 500.
+    content = await _dispatch_tool(name, arguments)
+    # PRONOTE can rotate tokens during automatic session refreshes.
+    try:
+        _persist_client_credentials()
+    except Exception:
+        logger.error("Could not store the rotated PRONOTE token.")
+        content = _error_result("Could not store the rotated PRONOTE token. Check login-file permissions. If an action was attempted, verify its outcome before retrying.", "CREDENTIAL_STORAGE_FAILED")
+    data = json.loads(content[0].text)
+    internal = data.get("error_code") in {"INTERNAL_ERROR", "CREDENTIAL_STORAGE_FAILED"}
+    return types.CallToolResult(content=content, structuredContent=data, isError=internal)
+
+
+async def _dispatch_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     if name not in TOOL_HANDLERS:
-        return _error_result(f"Unknown tool: {name}")
+        return _error_result(f"Unknown tool: {name}", "UNKNOWN_TOOL")
 
     try:
         features.authorize(name, arguments)
+        specification = next(item for item in await list_tools() if item.name == name)
+        validation = next(Draft202012Validator(specification.inputSchema).iter_errors(arguments), None)
+        if validation is not None:
+            field = ".".join(map(str, validation.absolute_path)) or "arguments"
+            message = f"Invalid {field}: input does not satisfy the {validation.validator} constraint."
+            if validation.validator == "enum":
+                message += " Allowed values: " + ", ".join(map(str, validation.validator_value)) + "."
+            raise ToolError(message, "INVALID_ARGUMENT")
         client = _get_client()
 
         # Select child if parent account
@@ -475,6 +508,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             return _json_result(pedagogy.handle(name, client, arguments, selected))
         if name in {tool.name for tool in features.TOOLS}:
             return _json_result(features.handle(name, client, arguments, selected, _find_period))
+        if name == "read_attachment_text":
+            return _json_result(pdf_text.handle(client, arguments))
+        if name in {tool.name for tool in overview.TOOLS}:
+            result = await overview.handle(name, client, arguments, selected,
+                {"timetable": _handle_timetable, "homework": _handle_homework}, _find_period,
+                _format_grade, _format_absence, _format_delay)
+            return _json_result(result)
 
         if name == "get_timetable":
             return await _handle_timetable(client, arguments, selected)
@@ -495,21 +535,23 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
     except pronotepy.ENTLoginError as e:
         logger.error("ENT authentication failed.")
-        return _error_result("ENT authentication failed.")
+        return _error_result("ENT authentication failed.", "AUTHENTICATION_REQUIRED", True)
     except pronotepy.CryptoError as e:
         logger.error("Pronote crypto/authentication failed.")
         global _client
         _client = None  # Force reconnect on next call
-        return _error_result("Authentication error. Check the QR PIN or generate a fresh QR code.")
+        return _error_result("Authentication error. Check the QR PIN or generate a fresh QR code.", "AUTHENTICATION_REQUIRED", True)
     except pronotepy.ChildNotFound as e:
         logger.error("Child not found: %s", e)
-        return _error_result(f"Child not found: {e}")
+        return _error_result(f"Child not found: {e}", "NOT_FOUND")
     except pronotepy.PronoteAPIError as e:
         logger.error("Pronote API error of type %s.", type(e).__name__)
         message = "Pronote API error. This section may be unavailable or the session may have expired."
         if name in features.WRITES:
             message += " The action may have succeeded. Verify in PRONOTE before retrying."
-        return _error_result(message)
+        return _error_result(message, "ACTION_OUTCOME_UNKNOWN" if name in features.WRITES else "PRONOTE_API_ERROR")
+    except ToolError as e:
+        return _error_result(str(e), e.code, e.relogin_required)
     except ValueError as e:
         logger.error("Configuration error: %s", e)
         return _error_result(str(e))
@@ -518,14 +560,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
         message = f"Unexpected error of type {type(e).__name__}."
         if name in features.WRITES:
             message += " The action may have succeeded. Verify in PRONOTE before retrying."
-        return _error_result(message)
-    finally:
-        # PRONOTE can rotate tokens during automatic session refreshes.
-        try:
-            _persist_client_credentials()
-        except Exception:
-            logger.error("Could not store the rotated PRONOTE token.")
-            raise RuntimeError("Could not store the rotated PRONOTE token. Check login-file permissions.") from None
+        return _error_result(message, "ACTION_OUTCOME_UNKNOWN" if name in features.WRITES else "INTERNAL_ERROR")
 
 
 # ---------------------------------------------------------------------------

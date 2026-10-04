@@ -8,6 +8,7 @@ import tempfile
 from urllib.parse import urlparse
 
 import pronotepy
+from errors import AuthenticationRequired
 
 
 def write_private_json(path: Path, data: dict) -> None:
@@ -81,7 +82,7 @@ def login_from_file(path: Path, account_type: str):
         allowed = ("pronote_url", "username", "password", "uuid", "client_identifier")
         client = cls.token_login(**{key: credentials[key] for key in allowed if key in credentials}, **options)
     if not client.logged_in:
-        raise ValueError("PRONOTE rejected the login. Generate a fresh QR code.")
+        raise AuthenticationRequired("PRONOTE rejected the login. Generate a fresh QR code.")
     persist_credentials(client, path, account_type, options)
     return client, account_type, options
 

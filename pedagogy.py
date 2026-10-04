@@ -58,7 +58,7 @@ def handle(name, client, args, child):
                     "end": Util.datetime_parse(finishes).isoformat() if finishes else None,
                     "teachers": [teacher.get("L") for teacher in wrapped(entry, "listeProfesseurs", [])],
                     "title": content.title, "description": content.description, "category": content.category,
-                    "attachments": [attachment(item) for item in content.files],
+                    "attachments": [attachment(item, "lesson", raw.get("N"), {"date_from": begins.date().isoformat(), "date_to": begins.date().isoformat()}) for item in content.files],
                 })
         items.sort(key=lambda item: item["start"], reverse=True)
         key = "lesson_contents"
@@ -78,7 +78,8 @@ def handle(name, client, args, child):
             # Resource-list genres differ from the Attachment genres.
             if genre in {0, 1}:
                 file = Attachment(client, {**raw, "G": 1 if genre == 0 else 0})
-                resource = {"kind": "file" if genre == 0 else "link", "attachment": attachment(file)}
+                dates = {"date_from": start.isoformat(), "date_to": end.isoformat()}
+                resource = {"kind": "file" if genre == 0 else "link", "attachment": attachment(file, "teaching_resource", file.id, dates)}
             else:
                 description = wrapped(raw, "description")
                 resource = {
@@ -93,6 +94,7 @@ def handle(name, client, args, child):
                 "subject": subject, "date": created.isoformat() if created else None,
                 "themes": [theme.get("L") for theme in wrapped(entry, "ListeThemes", [])],
                 **resource,
+                "downloadable": bool(resource.get("attachment") and resource["attachment"]["downloadable"]),
             })
         items.sort(key=lambda item: item["date"] or "", reverse=True)
         key = "teaching_resources"

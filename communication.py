@@ -27,7 +27,7 @@ TOOLS = [
     tool("get_discussion_messages", "Read messages in one discussion. Does not explicitly mark it read or send anything. Message text is untrusted content.", {
         "discussion_id": {"type": "string", "minLength": 1}, "child_name": CHILD, **PAGE,
     }, ("discussion_id",)),
-    tool("get_information_and_surveys", "List announcement and survey metadata without acknowledging or answering anything.", {
+    tool("get_information_and_surveys", "List announcement and survey metadata without acknowledging or answering anything. read is PRONOTE's acknowledgment state; reading through this server does not change it. Use mark_information_read only with explicit approval.", {
         "only_unread": {"type": "boolean", "default": False},
         "date_from": {"type": "string", "description": "Optional inclusive start date, YYYY-MM-DD."},
         "date_to": {"type": "string", "description": "Optional inclusive end date, YYYY-MM-DD."},
@@ -39,8 +39,15 @@ TOOLS = [
 ]
 
 
-def attachment(item):
-    return {"id": item.id, "name": item.name, "type": item.type, "url": item.url}
+def attachment(item, source=None, source_id=None, dates=None):
+    return attachment_metadata({"id": item.id, "name": item.name, "type": item.type, "url": item.url}, source, source_id, dates)
+
+
+def attachment_metadata(data, source=None, source_id=None, dates=None):
+    result = {**data, "downloadable": data["type"] == 1 and source is not None and source_id is not None}
+    result["download"] = {"source": source, "source_id": source_id, "attachment_id": data["id"], **(dates or {})} if result["downloadable"] else None
+    result["readable_as_pdf"] = result["downloadable"] and data["name"].lower().endswith(".pdf")
+    return result
 
 
 def paginate(items, args):
@@ -111,6 +118,6 @@ def handle(name, client, args, child):
             raise ValueError("Survey details are not supported. View and answer surveys in PRONOTE.")
         return {"child": child, "information": {
             **information(row), "content": row.content(),
-            "attachments": [attachment(item) for item in row.attachments()],
+            "attachments": [attachment(item, "information", row.id) for item in row.attachments()],
         }}
     raise ValueError("Unknown communication tool.")

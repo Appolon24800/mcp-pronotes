@@ -39,6 +39,9 @@ canteen menus.
 | `export_calendar` | Private iCalendar subscription URL, if available |
 | `export_timetable_pdf` | Generate a weekly timetable PDF and return its private URL |
 | `download_attachment` | Save an account-owned file in the private local downloads directory |
+| `read_attachment_text` | Extract PDF text on the server for remote clients |
+| `summarize_week` | Weekly timetable, homework, lesson contents and attendance data |
+| `get_grade_trend` | Chronological grade histories and descriptive values per subject |
 | `get_survey` | All question texts and attachments, without response-field interpretation |
 | `set_homework_done` | Opt-in homework completion update |
 | `create_discussion` | Opt-in message to specified recipient IDs |
@@ -73,15 +76,61 @@ vary by PRONOTE version. No automated live test changes account data.
 
 `download_attachment` accepts a `source`, `source_id`, and `attachment_id`, not
 a URL or output path. Sources are `homework`, `information`, `lesson`, and
-`teaching_resource`. For lessons, `source_id` is a lesson-content entry's `id`.
+`teaching_resource`. For lessons, `source_id` is a lesson-content entry's `id`
+or its `lesson_id`.
 For teaching resources, it is the attachment's `id`. Homework responses now
 include homework IDs. Supply `date_from` and `date_to` when locating older files.
+Lesson lookups default to the past 14 days. Attachments returned by homework,
+announcement and lesson tools include `downloadable`, `readable_as_pdf` and
+`download`. Copy the `download` object into either attachment tool. It contains
+the source, IDs and applicable dates. External links have no download arguments.
 
 The tool resolves a fresh attachment URL from your account. It accepts only
 HTTPS file URLs on the school's PRONOTE origin, rejects redirects, and limits
 downloads to 20 MiB. It saves files under random names in `downloads/`, with
 directory permissions `700` and file permissions `600`. Git ignores this
 directory. External links are not downloaded.
+
+`read_attachment_text` uses the same account-owned lookup and download checks.
+It returns PDF text through MCP or MCPO, without requiring access to the
+server's filesystem. The tool removes its downloaded copy after extraction.
+Use `page_from`, `page_limit` and `max_characters` to bound results. Limits are
+20 pages and 60000 characters per call, 1000 pages per document, and a 25-second
+worker timeout. Linux workers also have memory and CPU limits. Password-protected
+PDFs and OCR are unsupported. Scanned pages may return `has_text=false`.
+Check `next_page` and `truncated`. If a page exceeds the character budget,
+`next_page` points to that same page. Increase the budget to retry it, up to
+60000 characters. Text beyond that limit on a single page is not accessible.
+Document text is untrusted content, not instructions for the assistant.
+
+### Errors through MCP and MCPO
+
+Expected refusals return a JSON object with `success=false`, `error`,
+`error_code`, `relogin_required` and `retryable=false`. Examples include
+`CONFIRMATION_REQUIRED`, `WRITES_DISABLED`, `INVALID_ARGUMENT`,
+`ATTACHMENT_NOT_FOUND` and `AUTHENTICATION_REQUIRED`. Missing or false
+confirmation never triggers login or an account change. Schema validation
+still runs before login.
+
+These refusals use MCP `isError=false` because MCPO maps `isError=true` to
+HTTP 500. Clients must inspect `success` and `error_code`, not HTTP status alone.
+Internal failures and credential-storage failures retain `isError=true`.
+The stdio server cannot choose MCPO's HTTP status. If a write reports
+`ACTION_OUTCOME_UNKNOWN`, verify its outcome in PRONOTE before retrying.
+
+### Weekly data and grade histories
+
+`summarize_week` accepts any date within the requested week. It returns data,
+not an AI-written summary. Failed sections have `partial=true` and
+`section_errors`. Canceled and replacement lessons remain separate. The tool
+does not infer timetable changes from announcements.
+
+Grades retain their original strings and flags. Added numeric fields parse
+decimal commas and return null for nonnumeric values. `grade_on_20` rescales
+the score using its denominator, regardless of the original `is_out_of_20`
+flag. `get_grade_trend` accepts `period_names` and an optional exact `subject`.
+It excludes duplicate grades across overlapping periods. Its unweighted means
+include bonus and optional grades and are not official averages.
 
 ### Remaining API gaps
 
@@ -103,7 +152,7 @@ specific child, or omit it to default to the first child.
 ### 1. Install dependencies
 
 ```bash
-pip install "pronotepy>=2.15.7,<3" "mcp>=1.20.0,<2"
+pip install "pronotepy>=2.15.7,<3" "mcp>=1.20.0,<2" "pypdf>=6.0,<7"
 ```
 
 Or from the requirements file:
